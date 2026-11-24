@@ -84,6 +84,15 @@ textarea{min-height:70px;resize:vertical}
 #toast{position:fixed;left:50%;bottom:150px;transform:translateX(-50%);z-index:60;background:#223;color:#fff;padding:10px 16px;border-radius:20px;font-size:14px;opacity:0;transition:opacity .2s;pointer-events:none;max-width:90%;text-align:center}
 #toast.show{opacity:1}
 .help p{margin:6px 0;font-size:14px}
+.slots{display:grid;grid-template-columns:repeat(4,1fr);gap:6px}
+.slot{border:1px solid #b7d6d6;background:#fff;border-radius:10px;padding:8px 2px;font-size:14px;font-weight:600;color:var(--brand)}
+.slot small{display:block;font-size:11px;font-weight:400;color:var(--muted);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.slot.taken{background:var(--brand2);border-color:var(--brand)}
+.slot.taken.Came{background:var(--okbg);border-color:var(--ok);color:var(--ok)}
+.slot.taken.No-show{background:var(--badbg);border-color:var(--bad);color:var(--bad)}
+.slot.taken small{color:inherit;font-weight:600}
+.btn.wa{background:#1fa855}
+.chip.wa{border-color:#1fa855;color:#13803f}
 </style>
 </head>
 <body>
@@ -190,6 +199,75 @@ async function route(){ if(!unlocked) return; freeURLs();
   catch(e){ console.error(e); $('#main').innerHTML=`<div class="card">Something went wrong: ${esc(e.message)}</div>`; } }
 const setTitle = t => $('#title').textContent = t;
 
+/* ---------- Clinic schedule & slots ---------- */
+const DAYS=[[1,'Mon'],[2,'Tue'],[3,'Wed'],[4,'Thu'],[5,'Fri'],[6,'Sat'],[0,'Sun']];
+const dayName = d => DAYS.find(x=>x[0]===d)[1];
+const dow = s => { const [y,m,d]=s.split('-').map(Number); return new Date(y,m-1,d).getDay(); };
+const toMin = t => { const [h,m]=t.split(':').map(Number); return h*60+m; };
+const toHHMM = n => String(Math.floor(n/60)).padStart(2,'0')+':'+String(n%60).padStart(2,'0');
+function makeSlots(s){ const out=[]; for(let t=toMin(s.start); t+Number(s.slot)<=toMin(s.end); t+=Number(s.slot)) out.push(toHHMM(t)); return out; }
+const sessionsOn = date => (settings.schedule||[]).filter(s=>s.days.includes(dow(date))).sort((a,b)=>a.start.localeCompare(b.start));
+const inSession = (v,s) => v.hospital===s.hospital && v.time && v.time>=s.start && v.time<s.end;
+function quickBook(sid,t){ const s=settings.schedule.find(x=>x.id===sid); openVisit(null,null,curDate,{time:t,hospital:s.hospital,fee:s.fee}); }
+async function walkIn(sid){ const s=settings.schedule.find(x=>x.id===sid);
+  const taken=new Set((await byIdx('visits','date',curDate)).filter(v=>v.hospital===s.hospital&&v.status!=='Cancelled').map(v=>v.time));
+  const now=new Date(), nowHHMM=toHHMM(now.getHours()*60+now.getMinutes());
+  let free=makeSlots(s).filter(t=>!taken.has(t));
+  if(curDate===todayISO()){ const later=free.filter(t=>t>=toHHMM(toMin(nowHHMM)-Number(s.slot)+1)); if(later.length) free=later; }
+  if(!free.length){ toast('This session is full'); return; } quickBook(sid,free[0]); }
+let S=null; // session being edited
+function openSession(id){ const s=id?settings.schedule.find(x=>x.id===id):{id:uid(),hospital:'',days:[],start:'17:00',end:'20:00',slot:15,fee:'',location:''};
+  S=JSON.parse(JSON.stringify(s)); S.isNew=!id;
+  openSheet(`<h3>${id?'Edit clinic session':'Add clinic session'}</h3>
+    <label>Hospital / clinic *</label><input type="text" id="sHosp" list="hospList2" value="${esc(S.hospital)}" placeholder="e.g. Services Hospital">
+    <datalist id="hospList2">${settings.hospitals.map(h=>`<option value="${esc(h)}">`).join('')}</datalist>
+    <label>Days *</label><div class="seg" id="sDays">${DAYS.map(([n,l])=>`<button class="chip Booked ${S.days.includes(n)?'on':''}" onclick="toggleDay(${n},this)">${l}</button>`).join('')}</div>
+    <div class="two"><div><label>From</label><input type="time" id="sStart" value="${S.start}"></div><div><label>To</label><input type="time" id="sEnd" value="${S.end}"></div></div>
+    <div class="two"><div><label>Minutes per patient</label><select id="sSlot">${[5,10,15,20,30,45,60].map(n=>`<option ${Number(S.slot)===n?'selected':''}>${n}</option>`).join('')}</select></div>
+    <div><label>Fee (PKR)</label><input type="number" id="sFee" inputmode="numeric" value="${esc(S.fee||'')}"></div></div>
+    <label>Location / Google Maps link (sent to patients)</label><input type="text" id="sLoc" value="${esc(S.location||'')}" placeholder="Optional">
+    <button class="btn" onclick="saveSession()">Save</button><button class="btn sec" onclick="closeSheet()">Cancel</button>
+    ${id?`<button class="btn danger" onclick="deleteSession('${id}')">Delete session</button>`:''}`); }
+function toggleDay(n,el){ const i=S.days.indexOf(n); if(i>=0) S.days.splice(i,1); else S.days.push(n); el.classList.toggle('on',i<0); }
+async function saveSession(){ S.hospital=$('#sHosp').value.trim(); S.start=$('#sStart').value; S.end=$('#sEnd').value; S.slot=Number($('#sSlot').value); S.fee=$('#sFee').value.trim(); S.location=$('#sLoc').value.trim();
+  if(!S.hospital){ toast('Enter the hospital name'); return; } if(!S.days.length){ toast('Choose at least one day'); return; }
+  if(!S.start||!S.end||S.start>=S.end){ toast('"To" time must be after "From" time'); return; }
+  const s={...S}; delete s.isNew; settings.schedule=settings.schedule||[];
+  const i=settings.schedule.findIndex(x=>x.id===s.id); if(i>=0) settings.schedule[i]=s; else settings.schedule.push(s);
+  if(!settings.hospitals.includes(s.hospital)) settings.hospitals.push(s.hospital);
+  await saveSettings(); closeSheet(); toast('Session saved'); route(); }
+async function deleteSession(id){ if(!confirm('Delete this clinic session? Existing appointments are kept.')) return;
+  settings.schedule=settings.schedule.filter(x=>x.id!==id); await saveSettings(); closeSheet(); route(); }
+
+/* ---------- WhatsApp (one tap: opens WhatsApp with the message ready) ---------- */
+const docName = () => settings.doctorName || 'Dr. Faisal Hassan Zahid';
+function locFor(hosp){ const s=(settings.schedule||[]).find(x=>x.hospital===hosp&&x.location); return s?s.location:''; }
+function openWA(phone,text){ const n=waNumber(phone); window.open('https://wa.me/'+(n||'')+'?text='+encodeURIComponent(text),'_blank'); }
+function msgConfirm(v,p){ const loc=locFor(v.hospital);
+  return `Assalam-o-Alaikum ${p.name},\n\nYour appointment with ${docName()} is confirmed:\n📅 ${fmtDate(v.date)}\n⏰ ${fmtTime(v.time)}\n🏥 ${v.hospital}${loc?'\n📍 '+loc:''}\n\nPlease arrive 10 minutes early and bring your previous reports and medicines.\n\nFor emergencies, please go to the nearest emergency department immediately.`; }
+function msgReminder(v,p){ const loc=locFor(v.hospital);
+  return `Assalam-o-Alaikum ${p.name},\n\nReminder: your appointment with ${docName()} is tomorrow, ${fmtDate(v.date)}, at ${fmtTime(v.time)}, ${v.hospital}.${loc?'\n📍 '+loc:''}\n\nIf you cannot come, please let us know by replying to this message.`; }
+function msgTimings(){ const sch=settings.schedule||[]; if(!sch.length) return '';
+  const byH={}; sch.forEach(s=>(byH[s.hospital] ||= []).push(s));
+  let t=`Assalam-o-Alaikum. Clinic timings of ${docName()}:\n`;
+  for(const [h,list] of Object.entries(byH)){ t+=`\n🏥 ${h}\n`; list.sort((a,b)=>a.start.localeCompare(b.start)).forEach(s=>{ t+=`   ${DAYS.filter(d=>s.days.includes(d[0])).map(d=>d[1]).join(', ')}: ${fmtTime(s.start)} – ${fmtTime(s.end)}\n`; });
+    const loc=locFor(h); if(loc) t+=`   📍 ${loc}\n`; }
+  return t+`\nTo book, please reply with the patient's name and preferred hospital and day.`; }
+async function sendConfirm(id){ const v=await one('visits',id), p=await one('patients',v.patientId);
+  if(!p||!p.phone){ toast('This patient has no phone number'); return; }
+  openWA(p.phone,msgConfirm(v,p)); v.confirmedAt=Date.now(); await put('visits',v); if(!F) route(); }
+async function sendTimings(phone){ const t=msgTimings(); if(!t){ toast('Set up the clinic schedule first (Backup & more)'); return; } openWA(phone||'',t); }
+async function openReminders(){ const d=addDays(curDate,1);
+  const vs=(await byIdx('visits','date',d)).filter(v=>v.status==='Booked').sort((a,b)=>(a.time||'99').localeCompare(b.time||'99'));
+  const pts=new Map((await all('patients')).map(p=>[p.id,p]));
+  openSheet(`<h3>Reminders for ${esc(fmtDate(d))}</h3>
+    <div class="small">Tap <b>Send</b>. WhatsApp opens with the message ready. Press send there, then come back here for the next one.</div>
+    ${vs.length?vs.map(v=>{ const p=pts.get(v.patientId)||{}; return `<div class="card row"><div class="grow"><b>${esc(p.name||'')}</b><div class="sub">${fmtTime(v.time)} · ${esc(v.hospital||'')}</div></div>
+      ${p.phone?`<button class="btn inline ${v.remindedAt?'sec':''}" onclick="sendReminder('${v.id}')">${v.remindedAt?'✓ Sent':'Send'}</button>`:'<span class="small">No phone</span>'}</div>`; }).join(''):'<div class="empty">No booked appointments for that day.</div>'}
+    <button class="btn sec" onclick="closeSheet()">Close</button>`); }
+async function sendReminder(id){ const v=await one('visits',id), p=await one('patients',v.patientId);
+  openWA(p.phone,msgReminder(v,p)); v.remindedAt=Date.now(); await put('visits',v); setTimeout(openReminders,400); }
+
 /* ---------- Appointments (day view) ---------- */
 function backupBanner(hasData){ if(!hasData) return ''; const last=settings.lastBackup;
   const days = last ? Math.floor((Date.now()-last)/864e5) : null; if(last && days<7) return '';
@@ -199,7 +277,8 @@ async function vToday(){ setTitle('Appointments');
   const pts=new Map((await all('patients')).map(p=>[p.id,p])); const hasData=pts.size>0;
   const c=s=>visits.filter(v=>v.status===s).length;
   const fees=visits.filter(v=>v.status==='Came').reduce((t,v)=>t+Number(v.fee||0),0);
-  const groups={}; visits.forEach(v=>{ (groups[v.hospital||'No hospital set'] ||= []).push(v); });
+  const sessions=sessionsOn(curDate), used=new Set();
+  const tomorrowN=(await byIdx('visits','date',addDays(curDate,1))).filter(v=>v.status==='Booked').length;
   let h=`<div class="datebar"><button onclick="shiftDay(-1)">‹</button>
     <div class="d" onclick="pickDay()">${curDate===todayISO()?'Today, ':''}${esc(fmtDate(curDate))} ▾</div>
     <input type="date" id="dayPick" value="${curDate}" onchange="curDate=this.value||todayISO();route()">
@@ -207,15 +286,29 @@ async function vToday(){ setTitle('Appointments');
     ${curDate!==todayISO()?`<div style="text-align:center;margin-top:6px"><button class="btn inline sec" onclick="curDate=todayISO();route()">Back to today</button></div>`:''}
     ${backupBanner(hasData)}
     <div class="stats"><div class="stat"><b>${visits.length}</b><span>Total</span></div><div class="stat"><b>${c('Came')}</b><span>Came</span></div><div class="stat"><b>${c('No-show')}</b><span>No-show</span></div><div class="stat"><b style="font-size:15px;line-height:30px">${pkr(fees)}</b><span>Fees</span></div></div>`;
-  if(!visits.length) h+=`<div class="empty">No appointments on this day.<br><br>Tap <b>+</b> to add one.</div>`;
-  for(const [hosp,list] of Object.entries(groups)){ h+=`<h2>${esc(hosp)}</h2>`;
-    for(const v of list){ const p=pts.get(v.patientId)||{name:'(deleted patient)'};
-      h+=`<div class="card"><div class="row" onclick="openVisit('${v.id}')"><div class="time">${fmtTime(v.time)}</div>
-        <div class="grow"><b>${esc(p.name)}</b><div class="sub">${esc(p.phone||'')}${v.notes?' · '+esc(v.notes):''}</div></div>
-        <div class="small">${v.fee?pkr(v.fee):''}</div></div>
-        <div class="chips">${['Booked','Came','No-show'].map(s=>`<button class="chip ${s} ${v.status===s?'on':''}" onclick="setStatus('${v.id}','${s}')">${s==='Came'?'✓ Came':s==='No-show'?'✗ No-show':s}</button>`).join('')}
-        <button class="chip" onclick="go('patient/${v.patientId}')">Patient ›</button></div></div>`; } }
+  if(tomorrowN) h+=`<button class="btn sec" onclick="openReminders()">🔔 Send reminders for ${curDate===todayISO()?'tomorrow':esc(fmtDate(addDays(curDate,1)))} (${tomorrowN})</button>`;
+  if(!(settings.schedule||[]).length) h+=`<div class="banner" style="background:var(--brand2);color:var(--brand);border-color:#b7d6d6" onclick="go('more')">🗓️ Set up the clinic schedule (hospitals, days, timings) to get one-tap booking slots. Tap here.</div>`;
+  else if(!sessions.length) h+=`<div class="empty">No clinic session scheduled on ${esc(dayName(dow(curDate)))}.</div>`;
+  for(const s of sessions){ const inS=visits.filter(v=>inSession(v,s)); inS.forEach(v=>used.add(v.id));
+    const slots=makeSlots(s), live=inS.filter(v=>v.status!=='Cancelled');
+    h+=`<h2>${esc(s.hospital)} · ${fmtTime(s.start)}–${fmtTime(s.end)}</h2><div class="card">
+      <div class="small" style="margin-bottom:6px">${live.length} booked · ${Math.max(0,slots.length-new Set(live.map(v=>v.time)).size)} free — tap a free time to book</div>
+      <div class="slots">${slots.map(t=>{ const v=live.find(x=>x.time===t); const p=v&&pts.get(v.patientId);
+        return v?`<button class="slot taken ${v.status}" onclick="openVisit('${v.id}')">${fmtTime(t)}<small>${esc((p?p.name:'').split(' ')[0])}</small></button>`
+                :`<button class="slot" onclick="quickBook('${s.id}','${t}')">${fmtTime(t)}<small>Free</small></button>`; }).join('')}</div>
+      <button class="btn" style="margin-top:10px" onclick="walkIn('${s.id}')">＋ Book next free slot</button></div>
+      ${inS.map(v=>visitCard(v,pts)).join('')}`; }
+  const others=visits.filter(v=>!used.has(v.id));
+  if(others.length) h+=`<h2>${sessions.length?'Other appointments':'Appointments'}</h2>`+others.map(v=>visitCard(v,pts,true)).join('');
+  if(!visits.length && !sessions.length && (settings.schedule||[]).length) h+=`<div class="empty">Tap <b>+</b> to add an appointment anyway.</div>`;
   $('#main').innerHTML=h; }
+function visitCard(v,pts,showHosp){ const p=pts.get(v.patientId)||{name:'(deleted patient)'};
+  return `<div class="card"><div class="row" onclick="openVisit('${v.id}')"><div class="time">${fmtTime(v.time)}</div>
+    <div class="grow"><b>${esc(p.name)}</b><div class="sub">${esc(p.phone||'')}${showHosp&&v.hospital?' · '+esc(v.hospital):''}${v.notes?' · '+esc(v.notes):''}</div></div>
+    <div class="small">${v.fee?pkr(v.fee):''}</div></div>
+    <div class="chips">${['Booked','Came','No-show'].map(s=>`<button class="chip ${s} ${v.status===s?'on':''}" onclick="setStatus('${v.id}','${s}')">${s==='Came'?'✓ Came':s==='No-show'?'✗ No-show':s}</button>`).join('')}
+    ${p.phone?`<button class="chip wa" onclick="sendConfirm('${v.id}')">💬 ${v.confirmedAt?'Sent ✓':'Confirm'}</button>`:''}
+    <button class="chip" onclick="go('patient/${v.patientId}')">Patient ›</button></div></div>`; }
 function shiftDay(n){ curDate=addDays(curDate,n); route(); }
 function pickDay(){ const i=$('#dayPick'); if(i.showPicker) try{ i.showPicker(); return; }catch(e){} i.click(); }
 async function setStatus(id,s){ const v=await one('visits',id); v.status=s; v.updatedAt=Date.now(); await put('visits',v); route(); }
@@ -246,7 +339,7 @@ async function vPatient(id){ const p=await one('patients',id); if(!p){ go('patie
       <div class="sub">${esc([p.phone, p.age?p.age+' yrs':'', p.gender].filter(Boolean).join(' · '))}</div></div>
       <button class="btn inline sec" onclick="openPatient('${p.id}')">Edit</button></div>
       ${p.notes?`<div style="margin-top:8px;white-space:pre-wrap">${esc(p.notes)}</div>`:''}
-      ${p.phone?`<div class="links"><a href="tel:${esc(p.phone)}">📞 Call</a><a href="https://wa.me/${wa}" target="_blank" rel="noopener">💬 WhatsApp</a></div>`:''}
+      ${p.phone?`<div class="links"><a href="tel:${esc(p.phone)}">📞 Call</a><a href="https://wa.me/${wa}" target="_blank" rel="noopener">💬 WhatsApp</a><a href="#" onclick="event.preventDefault();sendTimings('${esc(p.phone)}')">🗓️ Send timings</a></div>`:''}
       <div class="small" style="margin-top:8px">${visits.length} appointments · ${came} came · ${ns} no-show</div></div>
     <button class="btn" onclick="openVisit(null,'${p.id}')">＋ New appointment</button>
     <h2>Appointments</h2>
@@ -280,12 +373,14 @@ async function deletePatient(id){ if(!confirm('Delete this patient with all thei
 
 /* ---------- Appointment form ---------- */
 let F=null; // current form state
-async function openVisit(visitId, patientId, date){
+async function openVisit(visitId, patientId, date, preset){
   const v = visitId ? await one('visits',visitId) : {id:uid(), patientId:patientId||null, date:date||todayISO(), time:'', hospital:settings.hospitals[0]||'', status:'Booked', fee:settings.lastFee||'', notes:''};
+  if(preset){ v.time=preset.time; v.hospital=preset.hospital; if(preset.fee) v.fee=preset.fee; }
   F = {v, isNew:!visitId, pid:v.patientId, pending:[], patients:(await all('patients')).sort((a,b)=>a.name.localeCompare(b.name))};
   const existing = visitId ? (await byIdx('photos','visitId',visitId)) : [];
   const p = F.pid ? F.patients.find(x=>x.id===F.pid) : null;
-  openSheet(`<h3>${F.isNew?'New appointment':'Appointment'}</h3>
+  openSheet(`<h3>${F.isNew?(preset?`Book ${fmtTime(v.time)} · ${esc(v.hospital)}`:'New appointment'):'Appointment'}</h3>
+    ${preset?`<div class="small">${esc(fmtDate(v.date))}</div>`:''}
     <label>Patient *</label>
     <div id="pSel">${p?patientChip(p):patientPicker()}</div>
     <div class="two"><div><label>Date</label><input type="date" id="vDate" value="${v.date}"></div><div><label>Time</label><input type="time" id="vTime" value="${v.time||''}"></div></div>
@@ -297,8 +392,11 @@ async function openVisit(visitId, patientId, date){
     <label>Prescription / report photos</label>
     <div class="two"><button class="btn sec" onclick="pickPhoto(true)">📷 Camera</button><button class="btn sec" onclick="pickPhoto(false)">🖼️ Gallery</button></div>
     <div class="photos" id="vPhotos">${existing.map(ph=>`<div onclick="openPhoto('${ph.id}')"><img src="${objURL(ph.data)}"></div>`).join('')}</div>
-    <button class="btn" onclick="saveVisit()">Save</button><button class="btn sec" onclick="closeSheet()">Cancel</button>
-    ${F.isNew?'':`<button class="btn danger" onclick="deleteVisit('${v.id}')">Delete appointment</button>`}`); }
+    ${F.isNew?`<button class="btn wa" onclick="saveVisit(true)">💬 Book &amp; send WhatsApp confirmation</button><button class="btn sec" onclick="saveVisit()">Book only</button>`
+      :`<button class="btn" onclick="saveVisit()">Save</button><button class="btn wa" onclick="saveVisit(true)">💬 Save &amp; send confirmation</button>`}
+    <button class="btn sec" onclick="closeSheet()">Cancel</button>
+    ${F.isNew?'':`<button class="btn danger" onclick="deleteVisit('${v.id}')">Delete appointment</button>`}`);
+  if(preset && !F.pid) setTimeout(()=>$('#pq')&&$('#pq').focus(),60); }
 function patientChip(p){ return `<div class="pick on row"><div class="grow"><b>${esc(p.name)}</b><div class="sub">${esc(p.phone||'')}</div></div>${F.isNew?`<button class="btn inline sec" onclick="F.pid=null;$('#pSel').innerHTML=patientPicker()">Change</button>`:''}</div>`; }
 function patientPicker(){ return `<input type="search" id="pq" placeholder="Search existing patient…" oninput="drawPick()" autocomplete="off"><div id="pickList"></div>
   <div class="card" style="margin-top:8px"><div class="small"><b>Or new patient</b></div>
@@ -313,7 +411,7 @@ function pickPhoto(camera){ const i=document.createElement('input'); i.type='fil
 async function compress(file){ const bmp=await createImageBitmap(file); const max=1800; const s=Math.min(1,max/Math.max(bmp.width,bmp.height));
   const c=document.createElement('canvas'); c.width=Math.round(bmp.width*s); c.height=Math.round(bmp.height*s); c.getContext('2d').drawImage(bmp,0,0,c.width,c.height); bmp.close&&bmp.close();
   return await new Promise(r=>c.toBlob(r,'image/jpeg',0.78)); }
-async function saveVisit(){ const v=F.v;
+async function saveVisit(sendWA){ const v=F.v;
   if(!F.pid){ const n=($('#npName')?.value||'').trim();
     if(!n){ toast('Choose a patient or type a new patient name'); return; }
     const np={id:uid(), name:n, phone:($('#npPhone')?.value||'').trim(), age:'', gender:'', notes:'', createdAt:Date.now(), updatedAt:Date.now()};
@@ -321,6 +419,9 @@ async function saveVisit(){ const v=F.v;
   const hosp=$('#vHosp').value.trim();
   Object.assign(v,{patientId:F.pid, date:$('#vDate').value||todayISO(), time:$('#vTime').value, hospital:hosp, fee:$('#vFee').value.trim(), notes:$('#vNotes').value.trim(), updatedAt:Date.now()});
   if(F.isNew) v.createdAt=Date.now();
+  if(F.isNew && v.status!=='Cancelled'){ const clash=(await byIdx('visits','date',v.date)).find(x=>x.id!==v.id&&x.time&&x.time===v.time&&x.hospital===v.hospital&&x.status!=='Cancelled');
+    if(clash && !confirm('Another patient is already booked at this time and hospital. Book anyway?')) return; }
+  let waPatient=null; if(sendWA){ waPatient=await one('patients',F.pid); if(waPatient&&waPatient.phone){ openWA(waPatient.phone,msgConfirm(v,waPatient)); v.confirmedAt=Date.now(); } else toast('Saved. This patient has no phone number, so no WhatsApp was sent.',3500); }
   await put('visits',v);
   for(const b of F.pending) await put('photos',{id:uid(), patientId:F.pid, visitId:v.id, createdAt:Date.now(), data:b});
   if(hosp && !settings.hospitals.includes(hosp)) settings.hospitals.push(hosp);
@@ -354,7 +455,7 @@ async function doBackup(forceDownload){
   toast('Preparing backup…', 6000);
   const [patients,visits,photos]=await Promise.all([all('patients'),all('visits'),all('photos')]);
   const ph=[]; for(const p of photos) ph.push({...p, data:await blobToDataURL(p.data)});
-  const json=JSON.stringify({app:'clinic-log', format:1, createdAt:new Date().toISOString(), hospitals:settings.hospitals, lastFee:settings.lastFee||'', patients, visits, photos:ph});
+  const json=JSON.stringify({app:'clinic-log', format:1, createdAt:new Date().toISOString(), hospitals:settings.hospitals, lastFee:settings.lastFee||'', schedule:settings.schedule||[], doctorName:settings.doctorName||'', patients, visits, photos:ph});
   const file=new File([json], `ClinicLog-backup-${todayISO()}.txt`, {type:'text/plain'});
   let r; if(forceDownload){ const a=document.createElement('a'); a.href=URL.createObjectURL(file); a.download=file.name; document.body.appendChild(a); a.click(); a.remove(); r='downloaded'; }
   else r=await shareOrDownload(file);
@@ -374,6 +475,7 @@ async function doRestore(file){ if(!file) return; let data;
     data.patients.forEach(p=>t.objectStore('patients').put(p)); data.visits.forEach(v=>t.objectStore('visits').put(v)); photos.forEach(p=>t.objectStore('photos').put(p));
     t.oncomplete=res; t.onerror=()=>rej(t.error); t.onabort=()=>rej(t.error); });
   settings.hospitals=[...new Set([...(settings.hospitals||[]), ...(data.hospitals||[])])]; if(data.lastFee) settings.lastFee=data.lastFee;
+  if(Array.isArray(data.schedule)&&data.schedule.length) settings.schedule=data.schedule; if(data.doctorName) settings.doctorName=data.doctorName;
   settings.lastBackup=Date.parse(data.createdAt)||Date.now(); await saveSettings();
   toast('Restored ✓', 3000); go('today'); route(); }
 async function exportCSV(){ const pts=new Map((await all('patients')).map(p=>[p.id,p]));
@@ -390,6 +492,12 @@ async function vMore(){ setTitle('Backup & more');
   const last=settings.lastBackup?new Date(settings.lastBackup).toLocaleString('en-GB',{day:'numeric',month:'short',year:'numeric',hour:'numeric',minute:'2-digit'}):'Never';
   $('#main').innerHTML=`
   ${installEvt?`<button class="btn" onclick="installApp()">📲 Install on home screen</button>`:''}
+  <div class="card"><b>🗓️ Clinic schedule</b><div class="sub">Each session gives one-tap booking slots on the Appointments screen.</div>
+    ${(settings.schedule||[]).length?[...settings.schedule].sort((a,b)=>a.hospital.localeCompare(b.hospital)||a.start.localeCompare(b.start)).map(s=>`<div class="row" style="padding:8px 0;border-bottom:1px solid var(--line)" onclick="openSession('${s.id}')"><div class="grow"><b>${esc(s.hospital)}</b>
+      <div class="sub">${DAYS.filter(d=>s.days.includes(d[0])).map(d=>d[1]).join(', ')} · ${fmtTime(s.start)}–${fmtTime(s.end)} · ${s.slot} min${s.fee?' · '+pkr(s.fee):''}</div></div><span class="small">Edit ›</span></div>`).join(''):''}
+    <button class="btn" onclick="openSession()">＋ Add clinic session</button>
+    <label>Doctor's name (used in WhatsApp messages)</label><input type="text" id="docName" value="${esc(docName())}" onchange="settings.doctorName=this.value.trim();saveSettings();toast('Saved')">
+    <button class="btn sec" onclick="sendTimings('')">💬 Share timings on WhatsApp</button></div>
   <div class="card"><b>☁️ Backup to Google Drive</b><div class="sub">Last backup: ${esc(last)}</div>
     <button class="btn" onclick="doBackup()">Back up now</button>
     <div class="help"><p>Tap <b>Back up now</b> → choose <b>Drive</b> → pick your <b>Clinic Log Backups</b> folder → <b>Save</b>. Do this once a week. The app reminds you after 7 days.</p></div>

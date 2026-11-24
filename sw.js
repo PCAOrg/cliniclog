@@ -1,5 +1,5 @@
 // Clinic Log service worker: lets the app open with no internet.
-const CACHE = 'clinic-log-v1';
+const CACHE = 'clinic-log-v2';
 const FILES = ['./', './index.html', './manifest.json', './icon-192.png', './icon-512.png'];
 
 self.addEventListener('install', e => {
